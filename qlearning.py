@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import scipy.linalg as linalg
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import copy
 import pprint  # pretty print for dicts
 
@@ -17,13 +18,19 @@ class LinearQLearner():
                             The actions themselves should be binary (strings and other objects are accepted, but only 2
                             unique values per action column)
         :param outcome_cols: list of names of columns containing the outcomes.  Ordered with study stages. The outcomes
-                              should be real values.
+                              should be real values. Only outcomes starting from the second stage will be used from this
+                              argument, so you can either remove or leave the baseline outcome (in the second case, it
+                              will be automatically ignored). In order to use outcomes as features for the next stages,
+                              see description of the argument predictive_cols.
         :param predictive_cols: list of lists. The i-th inner list contains the names of the columns to be inserted in
                                 the predictive features (i.e. those that are NOT multiplied by the action in the linear
                                 regression model) for estimating the i-th Q-function. Since the history of a subject
                                 increases between each stage as H_i = (H_{i-1}, O_i, A_{i-1}), we take care of appending
                                 the previous lists to the new ones so you only need to include the states O_i of the
                                 i-th stage and which should appear in the predictive features of the i-th Q-function.
+                                However, this object does NOT automatically add past outcomes as features for the next
+                                predictions, so make sure to have the name of the observation column of stage i in the
+                                (i+1)-th list of this a argument if this is what you want.
                                 Do not add the action variable or the model will be wrong.
         :param tailoring_cols: list of lists or string 'repeat'. This variable follows te same logic as the the argument
                                predictive_cols, but for the tailoring features (i.e. those that ARE multiplied by the
@@ -42,6 +49,8 @@ class LinearQLearner():
             raise ValueError("Unsupported action_cols, should be non-empty list/array/tuple")
         self.action_cols = action_cols
         self.T = len(action_cols)  # number of stages
+        if len(outcome_cols) == self.T + 1:  # baseline outcome is present but will not be used AS AN OUTCOME in fit()
+            outcome_cols.remove(0)
         self.outcome_cols = outcome_cols
         self.max_is_good = max_is_good
         self.policy_params = {
@@ -106,6 +115,7 @@ class LinearQLearner():
     def fit(self, debug_mode=True):
         for stage in range(self.T-1, -1, -1):  # stages supposed 0-indexed
             # create pseudo-outcome
+            # NOTE: by design, we exclude the baseline outcome from self.outcome_cols so idx i == stage i+1 (for Y only)
             if stage == self.T - 1:
                 Y = self.df[[self.outcome_cols[stage]]].to_numpy()
             else:
@@ -135,7 +145,45 @@ class LinearQLearner():
             print('POLICY:')
             pprint.pp(self.policy_params)
 
+    def get_optimal_regime(self, df_new, stage):   # XXX untested for df_new != df
+        # XXX possibly differently from self.q_function and opt_q_function, the output here is 1D i.e. shape (n,)
+        if len(self.df.columns) != len(df_new.columns) or\
+                sum([c1 == c2 for c1, c2 in zip(self.df.columns, df_new.columns)]) < len(self.df.columns):
+            raise ValueError("input df and the df used for learning the policy should have same column names and order")
+        params_pred = self.policy_params['pred'][stage]
+        params_tailor = self.policy_params['tailor'][stage]
+        pred_cols_stage = self.predictive_cols[stage]
+        tailor_cols_stage = self.tailoring_cols[stage]
+        args = (pred_cols_stage, tailor_cols_stage, params_pred, params_tailor)
+        all_q_funcs = np.concatenate(
+            [self.q_function(*args, -1), self.q_function(*args, 1)], axis=1
+        )
+        if self.max_is_good:
+            return 2 * np.argmax(all_q_funcs, axis=1) - 1
+        else:
+            return 2 * np.argmin(all_q_funcs, axis=1) - 1
 
+
+    def plot_trajectories(self, baseline_outcome):
+        if not self.policy_params['pred']:
+            raise Warning('You should call fit before this function')
+        color_code = {True: 'tab:green', False:'tab:red'}
+        plt.figure()
+        prev_outcomes = self.df[baseline_outcome]
+        for stage, (outcome_col, action_col) in enumerate(zip(self.outcome_cols, self.action_cols)):
+            new_outcomes = self.df[outcome_col]
+            actions = self.df[action_col]
+            opt_actions = self.get_optimal_regime(self.df, stage)
+            agreement = actions == opt_actions
+            # add to plot
+            for prev, new, agree in zip(prev_outcomes, new_outcomes, agreement):
+                plt.plot([stage, stage+1], [prev, new], color=color_code[agree])
+            # update prev_outcomes
+            prev_outcomes = new_outcomes
+        green_patch = mpatches.Patch(color='tab:green', label='action coincides with DTR')
+        red_patch = mpatches.Patch(color='tab:red', label='action does not coincide with DTR')
+        plt.legend(handles=[green_patch, red_patch])
+        plt.show()
 
 
 
@@ -143,6 +191,7 @@ class LinearQLearner():
 if __name__ == '__main__':
     bmiData = pd.read_csv('data/bmiData.csv', index_col=0)
     estimator = LinearQLearner(bmiData, ['A1', 'A2'], ["month4BMI", "month12BMI"],
-                               [["gender", "race", "parentBMI", "baselineBMI"], []],
+                               [["gender", "race", "parentBMI", "baselineBMI"], ["month4BMI"]],
                                max_is_good=False)  # we want to minimize the BMI
     estimator.fit(debug_mode=True)
+    estimator.plot_trajectories('baselineBMI')
