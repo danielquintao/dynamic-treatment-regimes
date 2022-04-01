@@ -12,6 +12,7 @@ class LinearQLearner():
         '''
         Initializer an object for learning a DTR policy through a Q-learn procedure where the Q-function is estimated
         with linear regression
+        ACTION SHOULD NOT BE -1, +1 IN THE INPUT DF
         :param df: pandas dataframe with data to learn from. We expect the information corresponding to different stages
                    of the study to be present in different columns. TODO create auxiliary function to format the df
         :param action_cols: list of names of the columns containing the actions/treatments. Ordered with study stages
@@ -163,6 +164,10 @@ class LinearQLearner():
         else:
             return 2 * np.argmin(all_q_funcs, axis=1) - 1
 
+    def get_optimal_value(self):
+        Y = self.opt_q_function(self.predictive_cols[0], self.tailoring_cols[0],
+                                self.policy_params['pred'][0], self.policy_params['tailor'][0])
+        return np.mean(Y)
 
     def plot_trajectories(self, baseline_outcome):
         if not self.policy_params['pred']:
@@ -195,3 +200,4 @@ if __name__ == '__main__':
                                max_is_good=False)  # we want to minimize the BMI
     estimator.fit(debug_mode=True)
     estimator.plot_trajectories('baselineBMI')
+    print('OPTIMAL VALUE:', estimator.get_optimal_value())

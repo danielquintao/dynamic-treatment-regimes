@@ -5,16 +5,24 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import itertools
 import copy
+from tqdm import tqdm
 import pprint  # pretty print for dicts
 
 class InversePropensityWeightLearner():
     def __init__(self, df, action_cols, outcome_cols, observation_cols, tailor_function, max_is_good=True, debug_mode=True):
         '''
-
-        :param df: # TODO specify certain column names will be used internally
-        :param action_cols:
-        :param outcome_cols:
-        :param observation_cols:
+        Estimate optimal DTR with IPW method
+        ACTION SHOULD NOT BE -1, +1 IN THE INPUT DF, and NO COLUMN CALLED X1,.. A1.. OR W1... (lowercase is ok)
+        :param df: pandas dataframe with data to learn from. We expect the information corresponding to different stages
+                   of the study to be present in different columns. TODO create auxiliary function to format the df
+        :param action_cols: list of names of the columns containing the actions/treatments. Ordered with study stages
+                            The actions themselves should be binary (strings and other objects are accepted, but only 2
+                            unique values per action column)
+        :param outcome_cols: list of names of columns containing the outcomes.  Ordered with study stages. The outcomes
+                              should be real values. Only outcomes starting from the second stage will be used from this
+                              argument, so you can either remove or leave the baseline outcome (in the second case, it
+                              will be automatically ignored). In order to use outcomes as features for the next stages,
+                              see description of the argument predictive_cols.
         :param tailor_function: (NON INTUITIVE, READ ME) callable, able of receiving any pandas dataframe with any
                                  subset of the columns of df forming a history, and return a pandas dataframe or series
                                  or list-like object with one single value per entry of the callable's input. In order
@@ -23,8 +31,8 @@ class InversePropensityWeightLearner():
                                   want to leverage past knowledge, but you can ignore it in the behaviour of your
                                   callable) and return one single value for each row (subject) to be used as a decision
                                   feature by the policy (DTR).
-        :param max_is_good:
-        :param debug_mode:
+        :param max_is_good: bool. Whether the goal is to maximize (True) or to minimize the outcomes. Defaults to True.
+        :param debug_mode: bool. Intuitive
         '''
         if not isinstance(df, pd.DataFrame):
             raise ValueError("Only accepts pandas DataFrame")
@@ -130,7 +138,7 @@ class InversePropensityWeightLearner():
         best_val = -np.inf if self.max_is_good else np.inf
         all_vals = []
         counter = 0
-        for policy in itertools.product(*decisions_per_stage):
+        for policy in tqdm(itertools.product(*decisions_per_stage)):
             val = self.estimate_value(policy)
             if (self.max_is_good and val > best_val) or (not self.max_is_good and val < best_val):
                 best_val = val
@@ -167,6 +175,7 @@ if __name__ == '__main__':
 
     best_val, optimal_policy, all_vals = estimator.find_optimal_policy(debug=True)
     print('Best policy value and corresponding policy found:', best_val, optimal_policy)
+    # Best policy value and corresponding policy found: 67.72965967712759 ((1, 44.6853922172683), (1, 37.8464509420279))
     plt.figure()
     plt.hist(all_vals)
     plt.title("All policy values encountered during policy search")
