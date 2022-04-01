@@ -3,6 +3,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import itertools
 import copy
 import pprint  # pretty print for dicts
 
@@ -10,7 +11,7 @@ class InversePropensityWeightLearner():
     def __init__(self, df, action_cols, outcome_cols, observation_cols, tailor_function, max_is_good=True, debug_mode=True):
         '''
 
-        :param df:
+        :param df: # TODO specify certain column names will be used internally
         :param action_cols:
         :param outcome_cols:
         :param observation_cols:
@@ -50,7 +51,7 @@ class InversePropensityWeightLearner():
 
         # transform observations and save to simplified data frame
         # it will have a single column tailor_function(H_j) summarizing the features in stage j, for each stage
-        self.df = df[action_cols + outcome_cols]
+        self.df = df[action_cols]
         for stage, history_cols in enumerate(self.observation_cols):
             vals = tailor_function(df[history_cols])
             if isinstance(vals, pd.DataFrame):
@@ -71,22 +72,25 @@ class InversePropensityWeightLearner():
             self.df = self.df.assign(**{col: self.df[[col]].replace(action_space[0], -1)})
             self.df = self.df.assign(**{col: self.df[[col]].replace(action_space[1], 1)})
 
+        # combine outcomes into total one
+        self.df.insert(0, 'Y_TOTAL', np.sum(df[outcome_cols].to_numpy(), axis=1))
+        self.total_outcome_col = 'Y_TOTAL'
+
         # --------------------------------------------------------------------------------------------------------------
         # computation of propensity function
         # --------------------------------------------------------------------------------------------------------------
 
         self.prop_score_models = []  # will be a list of sklearn trained regressors XXX USE predict_proba, NOT predict
-        # self.prop_score_params = []  # will be a list of pairs of params (intercept and "slope" on tailor_function(H_j)) XXX
         # we will also insert the values of 1/prop_score(Hj) to df to ease further computations
         for stage, (action_col, tailored_ft) in enumerate(zip(self.action_cols, self.tailored_features)):
             y = self.df[action_col]
             X = self.df[[tailored_ft]]
             model = LogisticRegression().fit(X, y)
-            # self.prop_score_params.append((model.get_params()['coef_'], model.get_params()['intercept_'])) XXX
             self.prop_score_models.append(copy.deepcopy(model))
             # insert column of 1/(w+1E-10), 1E-10 only to avoid division by zero (which means feasibility assump not ok)
             vals = (1 / (model.predict_proba(X)[:, [1]] + 1E-10))  # [:,1] to get P(A=1)
             self.df.insert(len(self.df.columns), 'W' + str(stage), vals)
+        self.weight_cols = ['W' + str(stage) for stage in range(len(self.observation_cols))]
 
         if debug_mode:
             print(self.df.head())
@@ -97,7 +101,45 @@ class InversePropensityWeightLearner():
         :param policy: list of decision pairs (action, threshold) meaning "DO ACTION action IF TAILORED_FT > threshold"
         :return: float
         '''
+        if not np.all([decision[0] in [-1, 1] for decision in policy]):
+            raise ValueError("policy in wrong format. Make sure you put the action before the threshold in each tuple")
+        real_action = self.df[self.action_cols].to_numpy()
+        tailored_ft = self.df[self.tailored_features].to_numpy()
+        poli_action = 2 * (tailored_ft > np.array([decision[1] for decision in policy]).reshape(1, -1)) - 1
+        poli_action *= np.array([decision[0] for decision in policy]).reshape(1, -1)
+        weights = np.prod(self.df[self.weight_cols].to_numpy() * (real_action == poli_action), axis=1)
+        value = np.sum(weights * self.df[self.total_outcome_col]) / np.sum(weights)
+        return value
 
+    def find_optimal_policy(self, debug=False):
+        # build grid of all possible policies avoiding redundancy
+        # We set the possible thresholds for each stage as all vals of this tailored feature in data set, more max+1
+        # e.g. if in stage j the data contains values {0,1,4,4,10} then threshold_j can be {0,1,4,10,11}.
+        # The "ax+1" is there because our estimate_value() checks tailored_ft > threshold.
+        def get_thresholds(stage_):
+            ft_set = set(self.df[self.tailored_features[stage_]].tolist())
+            return list(ft_set) + [1 + max(ft_set)]
+        decisions_per_stage = []
+        for stage in range(self.T):
+            thresholds = get_thresholds(stage)
+            actions = [-1, 1]
+            combinations = list(itertools.product(actions, thresholds))
+            decisions_per_stage.append(combinations)
+        # finally, make the search
+        optimal_policy = None
+        best_val = -np.inf if self.max_is_good else np.inf
+        all_vals = []
+        counter = 0
+        for policy in itertools.product(*decisions_per_stage):
+            val = self.estimate_value(policy)
+            if (self.max_is_good and val > best_val) or (not self.max_is_good and val < best_val):
+                best_val = val
+                optimal_policy = copy.deepcopy(policy)
+            if debug:
+                all_vals.append(val)
+        if debug:
+            return best_val, optimal_policy, all_vals
+        return best_val, optimal_policy
 
 if __name__ == '__main__':
     bmiData = pd.read_csv('data/bmiData.csv', index_col=0)
@@ -118,3 +160,14 @@ if __name__ == '__main__':
                                                max_is_good=False,   # we want to minimize the BMI
                                                debug_mode=True
                                                )
+
+    random_policy = [(np.random.choice([-1, 1]), np.mean(bmiData[col])) for col in ["baselineBMI", "month4BMI"]]
+    print('Example of random policy:', random_policy)
+    print('Value of the random policy:', estimator.estimate_value(random_policy))
+
+    best_val, optimal_policy, all_vals = estimator.find_optimal_policy(debug=True)
+    print('Best policy value and corresponding policy found:', best_val, optimal_policy)
+    plt.figure()
+    plt.hist(all_vals)
+    plt.title("All policy values encountered during policy search")
+    plt.show()
